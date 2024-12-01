@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 
+# IDE-specific settings
+.idea/
+
 # C extensions & files
 *.so
 *.c
@@ -34,6 +37,7 @@ htmlcov/
 .cache
 nosetests.xml
 coverage.xml
+python_junit.xml
 
 # Translations
 *.mo
@@ -53,11 +57,16 @@ coverage.xml
 # Sphinx documentation
 docs/_build/
 
+# generated
+docs/source/intro.rst
+docs/source/quickstart.rst
+
+# css files
+docs/source/_themes/klink/static/css
+
 # vim .swp
 *.swp
 
 #ipython notebook files
 .ipynb_checkpoints/
 
-# css files
-docs/source/_themes/klink/static/css

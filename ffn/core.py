@@ -1,14 +1,14 @@
-from __future__ import print_function
-
 import random
 
+import matplotlib
 import numpy as np
 import pandas as pd
 import scipy.stats
 import sklearn.cluster
 import sklearn.covariance
 import sklearn.manifold
-from future.utils import iteritems, listvalues
+from matplotlib import pyplot as plt  # noqa
+from packaging.version import Version
 from pandas.core.base import PandasObject
 from scipy.optimize import minimize
 from scipy.stats import t
@@ -18,23 +18,18 @@ from tabulate import tabulate
 from . import utils
 from .utils import fmtn, fmtp, fmtpn, get_freq_name
 
-try:
-    import prettyplotlib  # NOQA
-except ImportError:
-    pass
+_PANDAS_TWO = Version(pd.__version__) >= Version("2")
+_PANDAS_TWO_TWO = Version(pd.__version__) >= Version("2.2")
 
-# avoid pyplot import failure in headless environment
-import os
+if _PANDAS_TWO_TWO:
+    _MonthEnd = "ME"
+    _YearEnd = "YE"
+else:
+    _MonthEnd = "M"
+    _YearEnd = "Y"
 
-import matplotlib
-
-if "DISPLAY" not in os.environ:
-    if matplotlib.__version__ > "2.":
-        matplotlib.use("agg", force=False)
-    else:
-        matplotlib.use("agg", warn=False)
-
-from matplotlib import pyplot as plt  # noqa
+# module level variable, can be different for non traditional markets (eg. crypto - 360)
+TRADING_DAYS_PER_YEAR = 252
 
 
 class PerformanceStats(object):
@@ -57,10 +52,11 @@ class PerformanceStats(object):
         * lookback_returns (Series): Returns for different
             lookback periods (1m, 3m, 6m, ytd...)
         * stats (Series): A series that contains all the stats
+        * annualization_factor (float): `Annualization factor` used in various calculations; aka `nperiods`, `252`
 
     """
 
-    def __init__(self, prices, rf=0.0):
+    def __init__(self, prices, rf=0.0, annualization_factor=TRADING_DAYS_PER_YEAR):
         super(PerformanceStats, self).__init__()
         self.prices = prices
         self.name = self.prices.name
@@ -68,11 +64,11 @@ class PerformanceStats(object):
         self._end = self.prices.index[-1]
 
         self.rf = rf
+        self.annualization_factor = annualization_factor
 
         self._update(self.prices)
 
     def set_riskfree_rate(self, rf):
-
         """
         Set annual risk-free rate property and calculate properly annualized
         monthly and daily rates. Then performance stats are recalculated.
@@ -197,9 +193,9 @@ class PerformanceStats(object):
         #  if months or years are missing then we will need .dropna() too
         self.daily_prices = self.daily_prices.dropna()
         # M = month end frequency
-        self.monthly_prices = obj.resample("M").last()  # .dropna()
+        self.monthly_prices = obj.resample(_MonthEnd).last()  # .dropna()
         # A == year end frequency
-        self.yearly_prices = obj.resample("A").last()  # .dropna()
+        self.yearly_prices = obj.resample(_YearEnd).last()  # .dropna()
 
         # let's save some typing
         dp = self.daily_prices
@@ -223,27 +219,22 @@ class PerformanceStats(object):
         # Will calculate daily figures only if the input data has at least daily frequency or higher (e.g hourly)
         # Rather < 2 days than <= 1 days in case of data taken at different hours of the days
         if r.index.to_series().diff().min() < pd.Timedelta("2 days"):
-            self.daily_mean = r.mean() * 252
-            self.daily_vol = np.std(r, ddof=1) * np.sqrt(252)
+            self.daily_mean = r.mean() * self.annualization_factor
+            self.daily_vol = np.std(r, ddof=1) * np.sqrt(self.annualization_factor)
 
-            # if type(self.rf) is float:
             if isinstance(self.rf, float):
-                self.daily_sharpe = r.calc_sharpe(rf=self.rf, nperiods=252)
-                self.daily_sortino = calc_sortino_ratio(r, rf=self.rf, nperiods=252)
+                self.daily_sharpe = r.calc_sharpe(rf=self.rf, nperiods=self.annualization_factor)
+                self.daily_sortino = calc_sortino_ratio(r, rf=self.rf, nperiods=self.annualization_factor)
             # rf is a price series
             else:
                 _rf_daily_price_returns = self.rf.to_returns()
-                self.daily_sharpe = r.calc_sharpe(
-                    rf=_rf_daily_price_returns, nperiods=252
-                )
-                self.daily_sortino = calc_sortino_ratio(
-                    r, rf=_rf_daily_price_returns, nperiods=252
-                )
+                self.daily_sharpe = r.calc_sharpe(rf=_rf_daily_price_returns, nperiods=self.annualization_factor)
+                self.daily_sortino = calc_sortino_ratio(r, rf=_rf_daily_price_returns, nperiods=self.annualization_factor)
 
             self.best_day = r.max()
             self.worst_day = r.min()
 
-        self.total_return = obj[-1] / obj[0] - 1
+        self.total_return = obj.iloc[-1] / obj.iloc[0] - 1
 
         self.cagr = calc_cagr(dp)
         self.incep = self.cagr
@@ -255,7 +246,8 @@ class PerformanceStats(object):
             self.avg_drawdown = self.drawdown_details["drawdown"].mean()
             self.avg_drawdown_days = self.drawdown_details["Length"].mean()
 
-        self.calmar = np.divide(self.cagr, np.abs(self.max_drawdown))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            self.calmar = np.divide(self.cagr, np.abs(self.max_drawdown))
 
         if len(r) < 4:
             return
@@ -280,18 +272,14 @@ class PerformanceStats(object):
             self.monthly_mean = mr.mean() * 12
             self.monthly_vol = np.std(mr, ddof=1) * np.sqrt(12)
 
-            if type(self.rf) is float:
+            if isinstance(self.rf, float):
                 self.monthly_sharpe = mr.calc_sharpe(rf=self.rf, nperiods=12)
                 self.monthly_sortino = calc_sortino_ratio(mr, rf=self.rf, nperiods=12)
             # rf is a price series
             else:
-                _rf_monthly_price_returns = self.rf.resample("M").last().to_returns()
-                self.monthly_sharpe = mr.calc_sharpe(
-                    rf=_rf_monthly_price_returns, nperiods=12
-                )
-                self.monthly_sortino = calc_sortino_ratio(
-                    mr, rf=_rf_monthly_price_returns, nperiods=12
-                )
+                _rf_monthly_price_returns = self.rf.resample(_MonthEnd).last().to_returns()
+                self.monthly_sharpe = mr.calc_sharpe(rf=_rf_monthly_price_returns, nperiods=12)
+                self.monthly_sortino = calc_sortino_ratio(mr, rf=_rf_monthly_price_returns, nperiods=12)
             self.best_month = mr.max()
             self.worst_month = mr.min()
 
@@ -322,12 +310,12 @@ class PerformanceStats(object):
             # add first month
             fidx = mr.index[0]
             try:
-                self.return_table[fidx.year][fidx.month] = float(mp[0]) / dp[0] - 1
+                self.return_table[fidx.year][fidx.month] = float(mp.iloc[0]) / dp.iloc[0] - 1
             except ZeroDivisionError:
                 self.return_table[fidx.year][fidx.month] = 0
             # calculate the YTD values
             for idx in self.return_table:
-                arr = np.array(listvalues(self.return_table[idx]))
+                arr = np.array(list(self.return_table[idx].values()))
                 self.return_table[idx][13] = np.prod(arr + 1) - 1
 
         if r.index.to_series().diff().min() < pd.Timedelta("93 days"):
@@ -336,7 +324,7 @@ class PerformanceStats(object):
 
             denom = dp[: dp.index[-1] - pd.DateOffset(months=3)]
             if len(denom) > 0:
-                self.three_month = dp[-1] / denom[-1] - 1
+                self.three_month = dp.iloc[-1] / denom.iloc[-1] - 1
 
         if r.index.to_series().diff().min() < pd.Timedelta("32 days"):
             if len(mr) < 4:
@@ -355,7 +343,7 @@ class PerformanceStats(object):
             denom = dp[: dp.index[-1] - pd.DateOffset(months=6)]
 
             if len(denom) > 0:
-                self.six_month = dp[-1] / denom[-1] - 1
+                self.six_month = dp.iloc[-1] / denom.iloc[-1] - 1
 
         # Will calculate yearly figures only if the input data has at least yearly frequency or higher (e.g monthly)
         # Rather < 367 days than <= 366 days in case of data taken at different hours of the days
@@ -369,7 +357,7 @@ class PerformanceStats(object):
             denom = dp[: dp.index[-1] - pd.DateOffset(years=1)]
 
             if len(denom) > 0:
-                self.one_year = dp[-1] / denom[-1] - 1
+                self.one_year = dp.iloc[-1] / denom.iloc[-1] - 1
 
             self.yearly_mean = yr.mean()
             self.yearly_vol = np.std(yr, ddof=1)
@@ -381,14 +369,10 @@ class PerformanceStats(object):
                 self.yearly_sortino = calc_sortino_ratio(yr, rf=self.rf, nperiods=1)
             # rf is a price series
             else:
-                _rf_yearly_price_returns = self.rf.resample("A").last().to_returns()
+                _rf_yearly_price_returns = self.rf.resample(_YearEnd).last().to_returns()
                 if self.yearly_vol > 0:
-                    self.yearly_sharpe = yr.calc_sharpe(
-                        rf=_rf_yearly_price_returns, nperiods=1
-                    )
-                self.yearly_sortino = calc_sortino_ratio(
-                    yr, rf=_rf_yearly_price_returns, nperiods=1
-                )
+                    self.yearly_sharpe = yr.calc_sharpe(rf=_rf_yearly_price_returns, nperiods=1)
+                self.yearly_sortino = calc_sortino_ratio(yr, rf=_rf_yearly_price_returns, nperiods=1)
 
             self.best_year = yr.max()
             self.worst_year = yr.min()
@@ -402,7 +386,7 @@ class PerformanceStats(object):
                 win = 0
                 for i in range(11, len(mr)):
                     tot += 1
-                    if mp[i] / mp[i - 11] > 1:
+                    if mp.iloc[i] / mp.iloc[i - 11] > 1:
                         win += 1
                 self.twelve_month_win_perc = float(win) / tot
 
@@ -514,7 +498,7 @@ class PerformanceStats(object):
         provided.
         """
         print("Stats for %s from %s - %s" % (self.name, self.start, self.end))
-        if type(self.rf) is float:
+        if isinstance(self.rf, float):
             print("Annual risk-free rate considered: %s" % (fmtp(self.rf)))
         print("Summary:")
         data = [
@@ -525,9 +509,7 @@ class PerformanceStats(object):
                 fmtp(self.max_drawdown),
             ]
         ]
-        print(
-            tabulate(data, headers=["Total Return", "Sharpe", "CAGR", "Max Drawdown"])
-        )
+        print(tabulate(data, headers=["Total Return", "Sharpe", "CAGR", "Max Drawdown"]))
 
         print("\nAnnualized Returns:")
         data = [
@@ -690,7 +672,7 @@ class PerformanceStats(object):
 
         plt.figure(figsize=figsize)
 
-        if matplotlib.__version__ > "2.":
+        if Version(matplotlib.__version__) >= Version("2"):
             # normed deprecated
             ax = ser.hist(bins=bins, figsize=figsize, density=True, **kwargs)
         else:
@@ -720,7 +702,7 @@ class PerformanceStats(object):
             # blank row
             if k is None:
                 continue
-            elif k == "rf" and not type(self.rf) == float:
+            elif k == "rf" and not isinstance(self.rf, float):
                 continue
 
             if n in short_names:
@@ -756,7 +738,7 @@ class PerformanceStats(object):
                 row = [""] * len(data[0])
                 data.append(sep.join(row))
                 continue
-            elif k == "rf" and not type(self.rf) == float:
+            elif k == "rf" and not isinstance(self.rf, float):
                 continue
 
             row = [n]
@@ -915,9 +897,7 @@ class GroupStats(dict):
 
     def _update_stats(self):
         # lookback returns dataframe
-        self.lookback_returns = pd.DataFrame(
-            {x.lookback_returns.name: x.lookback_returns for x in self.values()}
-        )
+        self.lookback_returns = pd.DataFrame({x.lookback_returns.name: x.lookback_returns for x in self.values()})
 
         self.stats = pd.DataFrame({x.name: x.stats for x in self.values()})
 
@@ -928,7 +908,6 @@ class GroupStats(dict):
             return "%s %s" % (get_freq_name(freq), kind)
 
     def set_riskfree_rate(self, rf):
-
         """
         Set annual `risk-free rate <https://www.investopedia.com/terms/r/risk-freerate.asp>`_ property and calculate properly annualized
         monthly and daily rates. Then performance stats are recalculated.
@@ -983,7 +962,7 @@ class GroupStats(dict):
                 raw = getattr(self[key], k)
 
                 # if rf is a series print nan
-                if k == "rf" and not type(raw) == float:
+                if k == "rf" and not isinstance(raw, float):
                     row.append(np.nan)
                 elif f is None:
                     row.append(raw)
@@ -1200,7 +1179,7 @@ def rebase(prices, value=100):
     return prices / prices.iloc[0] * value
 
 
-def calc_perf_stats(prices):
+def calc_perf_stats(prices, risk_free_rate=0.0, annualization_factor=252):
     """
     Calculates the performance statistics given an object.
     The object should be a Series of prices.
@@ -1209,9 +1188,11 @@ def calc_perf_stats(prices):
 
     Args:
         * prices (Series): Series of prices
+        * risk_free_rate (float, Series): Annual risk-free rate or risk-free rate price series
+        * annualization_factor (int): Annualizing factor. Default is 252 (trading days)
 
     """
-    return PerformanceStats(prices)
+    return PerformanceStats(prices, rf=risk_free_rate, annualization_factor=annualization_factor)
 
 
 def calc_stats(prices):
@@ -1255,10 +1236,10 @@ def to_drawdown_series(prices):
     drawdown = prices.copy()
 
     # Fill NaN's with previous values
-    drawdown = drawdown.fillna(method="ffill")
+    drawdown = drawdown.ffill()
 
     # Ignore problems with NaN's in the beginning
-    drawdown[np.isnan(drawdown)] = -np.Inf
+    drawdown[np.isnan(drawdown)] = -np.inf
 
     # Rolling maximum
     if isinstance(drawdown, pd.DataFrame):
@@ -1279,9 +1260,9 @@ def calc_mtd(daily_prices, monthly_prices):
     else use monthly_prices
     """
     if len(monthly_prices) == 1:
-        return daily_prices[-1] / daily_prices[0] - 1
+        return daily_prices.iloc[-1] / daily_prices.iloc[0] - 1
     else:
-        return daily_prices[-1] / monthly_prices[-2] - 1
+        return daily_prices.iloc[-1] / monthly_prices.iloc[-2] - 1
 
 
 def calc_ytd(daily_prices, yearly_prices):
@@ -1291,9 +1272,9 @@ def calc_ytd(daily_prices, yearly_prices):
     else use yearly_prices
     """
     if len(yearly_prices) == 1:
-        return daily_prices[-1] / daily_prices[0] - 1
+        return daily_prices.iloc[-1] / daily_prices.iloc[0] - 1
     else:
-        return daily_prices[-1] / yearly_prices[-2] - 1
+        return daily_prices.iloc[-1] / yearly_prices.iloc[-2] - 1
 
 
 def calc_max_drawdown(prices):
@@ -1349,9 +1330,7 @@ def drawdown_details(drawdown, index_type=pd.DatetimeIndex):
     if start[-1] > end[-1]:
         end.append(drawdown.index[-1])
 
-    result = pd.DataFrame(
-        columns=("Start", "End", "Length", "drawdown"), index=range(0, len(start))
-    )
+    result = pd.DataFrame(columns=("Start", "End", "Length", "drawdown"), index=range(0, len(start)))
 
     for i in range(0, len(start)):
         dd = drawdown[start[i] : end[i]].min()
@@ -1402,20 +1381,22 @@ def calc_sharpe(returns, rf=0.0, nperiods=None, annualize=True):
             etc.)
 
     """
-    # if type(rf) is float and rf != 0 and nperiods is None:
+    if nperiods is None:
+        nperiods = infer_freq(returns)
+
     if isinstance(rf, float) and rf != 0 and nperiods is None:
         raise Exception("Must provide nperiods if rf != 0")
 
     er = returns.to_excess_returns(rf, nperiods=nperiods)
     std = np.std(er, ddof=1)
-    res = np.divide(er.mean(), std)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        res = np.divide(er.mean(), std)
 
     if annualize:
         if nperiods is None:
             nperiods = 1
         return res * np.sqrt(nperiods)
-    else:
-        return res
+    return res
 
 
 def calc_information_ratio(returns, benchmark_returns):
@@ -1519,7 +1500,7 @@ def to_monthly(series, method="ffill", how="end"):
     Convenience method that wraps asfreq_actual
     with 'M' param (method='ffill', how='end').
     """
-    return series.asfreq_actual("M", method=method, how=how)
+    return series.asfreq_actual(_MonthEnd, method=method, how=how)
 
 
 def asfreq_actual(series, freq, method="ffill", how="end", normalize=False):
@@ -1536,9 +1517,7 @@ def asfreq_actual(series, freq, method="ffill", how="end", normalize=False):
         orig = pd.DataFrame({name: series})
 
     # add date column
-    t = pd.concat(
-        [orig, pd.DataFrame({"dt": orig.index.values}, index=orig.index.values)], axis=1
-    )
+    t = pd.concat([orig, pd.DataFrame({"dt": orig.index.values}, index=orig.index.values)], axis=1)
     # fetch dates
     dts = t.asfreq(freq=freq, method=method, how=how, normalize=normalize)["dt"]
 
@@ -1565,15 +1544,13 @@ def calc_inv_vol_weights(returns):
         Series {col_name: weight}
     """
     # calc vols
-    vol = np.divide(1.0, np.std(returns, ddof=1))
-    vol[np.isinf(vol)] = np.NaN
+    vol = np.divide(1.0, np.std(returns, ddof=1)).astype(float)
+    vol[np.isinf(vol)] = np.nan
     volsum = vol.sum()
     return np.divide(vol, volsum)
 
 
-def calc_mean_var_weights(
-    returns, weight_bounds=(0.0, 1.0), rf=0.0, covar_method="ledoit-wolf", options=None
-):
+def calc_mean_var_weights(returns, weight_bounds=(0.0, 1.0), rf=0.0, covar_method="ledoit-wolf", options=None):
     """
     Calculates the mean-variance weights given a DataFrame of returns.
 
@@ -1664,13 +1641,9 @@ def _erc_weights_slsqp(x0, cov, b, maximum_iterations, tolerance):
         # instead of using the true definition for trc we will use the optimization on page 5
         trc = weights * np.matmul(covar, weights)
 
-        n = len(trc)
         # sum of squared differences of total risk contributions
-        sse = 0.0
-        for i in range(n):
-            for j in range(n):
-                # switched from squared deviations to absolute deviations to avoid numerical instability
-                sse += np.abs(trc[i] - trc[j])
+        # switched from squared deviations to absolute deviations to avoid numerical instability
+        sse = np.sum(np.abs(trc - trc.reshape((-1, 1))))
         # minimizes metric
         return sse
 
@@ -1727,7 +1700,6 @@ def _erc_weights_ccd(x0, cov, b, maximum_iterations, tolerance):
     sigma_x = np.sqrt(x.T.dot(ctr))
 
     for iteration in range(maximum_iterations):
-
         for i in range(n):
             alpha = var[i]
             beta = ctr[i] - x[i] * alpha
@@ -1739,9 +1711,7 @@ def _erc_weights_ccd(x0, cov, b, maximum_iterations, tolerance):
             ctr = ctr - cov[i] * x_i + cov[i] * x_tilde
             sigma_x = sigma_x * sigma_x - 2 * x_i * cov[i].dot(x) + x_i * x_i * var[i]
             x[i] = x_tilde
-            sigma_x = np.sqrt(
-                sigma_x + 2 * x_tilde * cov[i].dot(x) - x_tilde * x_tilde * var[i]
-            )
+            sigma_x = np.sqrt(sigma_x + 2 * x_tilde * cov[i].dot(x) - x_tilde * x_tilde * var[i])
 
         # check convergence
         if np.power((x - x0) / x.sum(), 2).sum() < tolerance:
@@ -1750,9 +1720,7 @@ def _erc_weights_ccd(x0, cov, b, maximum_iterations, tolerance):
         x0 = x.copy()
 
     # no solution found
-    raise ValueError(
-        "No solution found after {0} iterations.".format(maximum_iterations)
-    )
+    raise ValueError("No solution found after {0} iterations.".format(maximum_iterations))
 
 
 def calc_erc_weights(
@@ -1809,14 +1777,10 @@ def calc_erc_weights(
     # calc risk parity weights matrix
     if risk_parity_method == "ccd":
         # cyclical coordinate descent implementation
-        erc_weights = _erc_weights_ccd(
-            initial_weights, covar, risk_weights, maximum_iterations, tolerance
-        )
+        erc_weights = _erc_weights_ccd(initial_weights, covar, risk_weights, maximum_iterations, tolerance)
     elif risk_parity_method == "slsqp":
         # scipys slsqp optimizer
-        erc_weights = _erc_weights_slsqp(
-            initial_weights, covar, risk_weights, maximum_iterations, tolerance
-        )
+        erc_weights = _erc_weights_slsqp(initial_weights, covar, risk_weights, maximum_iterations, tolerance)
 
     else:
         raise NotImplementedError("risk_parity_method not implemented")
@@ -1825,7 +1789,7 @@ def calc_erc_weights(
     return pd.Series(erc_weights, index=returns.columns, name="erc")
 
 
-def get_num_days_required(offset, period="d", perc_required=0.90):
+def get_num_days_required(offset, period="d", perc_required=0.90, annualization_factor=252):
     """
     Estimates the number of days required to assume that data is OK.
 
@@ -1849,7 +1813,7 @@ def get_num_days_required(offset, period="d", perc_required=0.90):
     elif period == "m":
         req = (days / 20) * perc_required
     elif period == "y":
-        req = (days / 252) * perc_required
+        req = (days / annualization_factor) * perc_required
     else:
         raise NotImplementedError("period not supported. Supported periods are d, m, y")
 
@@ -1924,7 +1888,7 @@ def calc_clusters(returns, n=None, plot=False):
     tmp = result[0]
     # map as such {cluster: [list of tickers], cluster2: [...]}
     inv_map = {}
-    for k, v in iteritems(tmp):
+    for k, v in tmp.items():
         inv_map[v] = inv_map.get(v, [])
         inv_map[v].append(k)
 
@@ -2048,9 +2012,7 @@ def limit_weights(weights, limit=0.1):
         weights = pd.Series(weights)
 
     if np.round(weights.sum(), 1) != 1.0:
-        raise ValueError(
-            "Expecting weights (that sum to 1) - sum is %s" % weights.sum()
-        )
+        raise ValueError("Expecting weights (that sum to 1) - sum is %s" % weights.sum())
 
     res = np.round(weights.copy(), 4)
     to_rebalance = (res[res > limit] - limit).sum()
@@ -2112,19 +2074,7 @@ def random_weights(n, bounds=(0.0, 1.0), total=1.0):
     return w
 
 
-def plot_heatmap(
-    data,
-    title="Heatmap",
-    show_legend=True,
-    show_labels=True,
-    label_fmt=".2f",
-    vmin=None,
-    vmax=None,
-    figsize=None,
-    label_color="w",
-    cmap="RdBu",
-    **kwargs
-):
+def plot_heatmap(data, title="Heatmap", show_legend=True, show_labels=True, label_fmt=".2f", vmin=None, vmax=None, figsize=None, label_color="w", cmap="RdBu", **kwargs):
     """
     Plot a heatmap using matplotlib's pcolor.
 
@@ -2193,7 +2143,7 @@ def rollapply(data, window, fn):
     Returns:
         * Object of same dimensions as data
     """
-    res = data.copy()
+    res = data.copy().astype(float)
     res[:] = np.nan
     n = len(data)
 
@@ -2276,7 +2226,74 @@ def deannualize(returns, nperiods):
             monthly, etc.
 
     """
+    if nperiods is None:
+        nperiods = infer_freq(returns)
     return np.power(1 + returns, 1.0 / nperiods) - 1.0
+
+
+def infer_freq(data):
+    """
+        Infer the most likely frequency given the input index. If the frequency is
+    uncertain or index is not DateTime like, just return None
+        Args:
+            * data (DataFrame, Series): Any timeseries dataframe or series
+    """
+    try:
+        if _PANDAS_TWO:
+            return pd.infer_freq(data.index)
+        else:
+            return pd.infer_freq(data.index, warn=False)
+    except Exception:
+        return None
+
+
+def _whole_periods_str_to_nperiods(freq, annualization_factor=TRADING_DAYS_PER_YEAR):
+    if freq in ("Y", "A"):
+        return 1
+    if freq == "M":
+        return 12
+    if freq == "D":
+        return annualization_factor
+    if freq in ("H", "h"):
+        return annualization_factor * 24
+    if freq == "T":
+        return annualization_factor * 24 * 60
+    if freq in ("S", "s"):
+        return annualization_factor * 24 * 60 * 60
+    return None
+
+
+def infer_nperiods(data, annualization_factor=TRADING_DAYS_PER_YEAR):
+    annualization_factor = annualization_factor or TRADING_DAYS_PER_YEAR
+    freq = infer_freq(data)
+
+    if freq is None:
+        return None
+
+    if _PANDAS_TWO_TWO:
+        # pandas 2.2+ compatibility
+        if "min" in freq:
+            freq = freq.replace("min", "T")
+        if "ME" in freq:
+            freq = freq.replace("ME", "M")
+        if "YE" in freq:
+            freq = freq.replace("YE-DEC", "Y")
+            freq = freq.replace("YE", "Y")
+
+    if len(freq) == 1:
+        return _whole_periods_str_to_nperiods(freq, annualization_factor)
+    try:
+        if freq.startswith("A"):
+            return 1
+        else:
+            whole_periods_str = freq[-1]
+            num_str = freq[:-1]
+            num = int(num_str)
+            return num * _whole_periods_str_to_nperiods(whole_periods_str, annualization_factor)
+    except KeyboardInterrupt:
+        raise
+    except BaseException:
+        return None
 
 
 def calc_sortino_ratio(returns, rf=0.0, nperiods=None, annualize=True):
@@ -2291,15 +2308,18 @@ def calc_sortino_ratio(returns, rf=0.0, nperiods=None, annualize=True):
             provided if rf is non-zero and rf is not a price series
 
     """
-    # if type(rf) is float and rf != 0 and nperiods is None:
     if isinstance(rf, float) and rf != 0 and nperiods is None:
         raise Exception("nperiods must be set if rf != 0 and rf is not a price series")
+
+    if nperiods is None:
+        nperiods = infer_freq(returns)
 
     er = returns.to_excess_returns(rf, nperiods=nperiods)
 
     negative_returns = np.minimum(er[1:], 0.0)
     std = np.std(negative_returns, ddof=1)
-    res = np.divide(er.mean(), std)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        res = np.divide(er.mean(), std)
 
     if annualize:
         if nperiods is None:
@@ -2322,9 +2342,10 @@ def to_excess_returns(returns, rf, nperiods=None):
         * excess_returns (Series, DataFrame): Returns - rf
 
     """
-    # if type(rf) is float and nperiods is not None:
-    if isinstance(rf, float) and nperiods is not None:
+    if nperiods is None:
+        nperiods = infer_freq(returns)
 
+    if isinstance(rf, float) and nperiods is not None:
         _rf = deannualize(rf, nperiods)
     else:
         _rf = rf
@@ -2345,16 +2366,34 @@ def calc_calmar_ratio(prices):
 
 def to_ulcer_index(prices):
     """
+    Calculates the Ulcer Index for a series of investment returns.
+
     Converts from prices -> `Ulcer index <https://www.investopedia.com/terms/u/ulcerindex.asp>`_
 
     See https://en.wikipedia.org/wiki/Ulcer_index
 
     Args:
-        * prices (Series, DataFrame): Prices
+        prices (pandas.Series or numpy.ndarray): A series of investment returns.
 
+    Returns:
+        float: The Ulcer Index.
     """
-    dd = prices.to_drawdown_series()
-    return np.divide(np.sqrt(np.sum(np.power(dd, 2))), dd.count())
+
+    # calculate the maximum value seen so far at each point in time
+    max_values = np.maximum.accumulate(prices)
+
+    # calculate the drawdowns relative to the maximum values
+    drawdowns = ((prices - max_values) / max_values) * 100
+
+    # calculate the squared drawdowns
+    squared_drawdowns = np.square(drawdowns)
+
+    # calculate the average of the squared drawdowns
+    avg_squared_drawdowns = np.mean(squared_drawdowns)
+
+    # calculate the square root of the average squared drawdowns
+    ulcer_index = np.sqrt(avg_squared_drawdowns)
+    return ulcer_index
 
 
 def to_ulcer_performance_index(prices, rf=0.0, nperiods=None):
@@ -2370,7 +2409,9 @@ def to_ulcer_performance_index(prices, rf=0.0, nperiods=None):
         * nperiods (int): Used to deannualize rf if rf is provided (non-zero)
 
     """
-    # if type(rf) is float and rf != 0 and nperiods is None:
+    if nperiods is None:
+        nperiods = infer_freq(prices)
+
     if isinstance(rf, float) and rf != 0 and nperiods is None:
         raise Exception("nperiods must be set if rf != 0 and rf is not a price series")
 

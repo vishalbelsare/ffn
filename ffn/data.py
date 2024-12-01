@@ -1,23 +1,17 @@
-from distutils.version import LooseVersion
+import warnings
+from typing import Sequence, Union
 
 import pandas as pd
+import yfinance
 
 import ffn
 
-# import ffn.utils as utils
 from . import utils
-
-# This is a temporary fix until pandas_datareader 0.7 is released.
-# pandas 0.23 has moved is_list_like from common to api.types, hence the monkey patch
-if LooseVersion(pd.__version__) > LooseVersion("0.23.0"):
-    pd.core.common.is_list_like = pd.api.types.is_list_like
-
-from pandas_datareader import data as pdata
 
 
 @utils.memoize
 def get(
-    tickers,
+    tickers: Sequence[str],
     provider=None,
     common_dates=True,
     forward_fill=False,
@@ -26,8 +20,8 @@ def get(
     ticker_field_sep=":",
     mrefresh=False,
     existing=None,
-    **kwargs
-):
+    **kwargs,
+) -> pd.DataFrame:
     """
     Helper function for retrieving data as a DataFrame.
 
@@ -78,6 +72,10 @@ def get(
             data[ticker] = provider(ticker=t, field=f, **kwargs)
 
         data[ticker] = data[ticker][~data[ticker].index.duplicated(keep="last")]
+        if isinstance(data[ticker], pd.DataFrame):
+            # newer yfinance returns as dataframe,
+            # convert to series
+            data[ticker] = data[ticker][data[ticker].columns[0]]
 
     df = pd.DataFrame(data)
 
@@ -104,40 +102,26 @@ def get(
     return df
 
 
-@utils.memoize
-def web(ticker, field=None, start=None, end=None, mrefresh=False, source="yahoo"):
+def web(ticker: str, field=None, start=None, end=None, mrefresh=False, source="yahoo"):
     """
     Data provider wrapper around pandas.io.data provider. Provides
     memoization.
     """
-    if source == "yahoo" and field is None:
-        field = "Adj Close"
-
-    tmp = _download_web(ticker, data_source=source, start=start, end=end)
-
-    if tmp is None:
-        raise ValueError("failed to retrieve data for %s:%s" % (ticker, field))
-
-    if field:
-        return tmp[field]
-    else:
-        return tmp
+    if source == "yahoo":
+        warnings.warn("web function is deprecated, as , use yf() instead")
+        return yf(ticker, field, start, end, mrefresh)
+    raise Exception("""pandas_datareader data readers are unmaintained and mostly broken, If you
+                    still want them, go import the datareader directly from that library.
+                    https://github.com/pydata/pandas-datareader/issues/977
+                    """)
 
 
 @utils.memoize
-def _download_web(name, **kwargs):
-    """
-    Thin wrapper to enable memoization
-    """
-    return pdata.DataReader(name, **kwargs)
-
-
-@utils.memoize
-def yf(ticker, field, start=None, end=None, mrefresh=False):
+def yf(ticker: str, field, start=None, end=None, mrefresh=False) -> Union[pd.Series, pd.DataFrame]:
     if field is None:
         field = "Adj Close"
 
-    tmp = pdata.get_data_yahoo(ticker, start=start, end=end)
+    tmp = yfinance.download(ticker, start=start, end=end)
 
     if tmp is None:
         raise ValueError("failed to retrieve data for %s:%s" % (ticker, field))
@@ -149,7 +133,7 @@ def yf(ticker, field, start=None, end=None, mrefresh=False):
 
 
 @utils.memoize
-def csv(ticker, path="data.csv", field="", mrefresh=False, **kwargs):
+def csv(ticker: str, path="data.csv", field="", mrefresh=False, **kwargs) -> pd.Series:
     """
     Data provider wrapper around pandas' read_csv. Provides memoization.
     """
